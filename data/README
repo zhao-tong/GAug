@@ -1,0 +1,14 @@
+All files are pickled.
+
+Graphs:
+Formats:
+[dataset]_adj.pkl             sp.csr_matrix
+[dataset]_features.pkl        torch.FloatTensor / sp.csr_matrix (2-D)
+[dataset]_labels.pkl          torch.LongTenosr (1-D) (2-D for PPI)
+[dataset]_tvt_nids.pkl        list of three np.ndarray (1-D)
+
+edge_probabilities
+Formats:
+[dataset]_graph_[i]_logits.pkl      np.ndarray (2-D)
+Due to file size limit, only the edge_probabilities of Cora is provided here.
+Please find the all edge_probabilities files at https://tinyurl.com/gaug-data
