@@ -36,6 +36,7 @@ if __name__ == "__main__":
     if gnn == 'jknet':
         layer_type = 'gsage'
         jk = True
+    feat_norm = 'row'
     if args.dataset == 'ppi':
         feat_norm = 'col'
     elif args.dataset in ('blogcatalog', 'flickr'):
