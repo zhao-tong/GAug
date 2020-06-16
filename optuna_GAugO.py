@@ -60,6 +60,7 @@ def objective(trial):
         n_layers = 1
         if jk:
             n_layers = 3
+    feat_norm = args.feat_norm
     if ds == 'ppi':
         feat_norm = 'col'
     elif ds in ('blogcatalog', 'flickr'):
