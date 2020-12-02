@@ -20,3 +20,17 @@ python train_GAugO.py --dataset cora --gnn gcn --gpu 0
 The format of data files are described in detail in the file ```data/README```.
 Due to file size limit, only the edge_probabilities of Cora is provided.
 Please find the all edge_probabilities files at https://tinyurl.com/gaug-data.
+
+## Cite
+If you find this repository useful in your research, please cite our paper:
+
+```bibtex
+@inproceedings{zhao2021data,
+  title={Data Augmentation for Graph Neural Networks},
+  author={Zhao, Tong and Liu, Yozen and Neves, Leonardo and Woodford, Oliver and Jiang, Meng and Shah, Neil},
+  booktitle={The Thirty-Fifth AAAI Conference on Artificial Intelligence},
+  pages={},
+  year={2021}
+}
+```
+
