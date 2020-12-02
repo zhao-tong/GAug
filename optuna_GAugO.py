@@ -21,7 +21,6 @@ ds = args.dataset
 gnn = args.gnn
 layer_type = args.gnn
 gpu = args.gpu
-sample_type = args.sample_type
 
 if gpu == '-1':
     cuda = -1
