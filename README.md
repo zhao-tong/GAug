@@ -2,6 +2,7 @@ Data Augmentation for Graph Neural Networks
 ====
 
 This is the implementation of the proposed GAugM and GAugO and baselines.
+\[[paper](https://arxiv.org/pdf/2006.06830.pdf)\]
 
 ## Requirements
 
