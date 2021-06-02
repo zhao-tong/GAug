@@ -4,7 +4,7 @@ This repository contains the source code for the AAAI'2021 paper:
 
 [Data Augmentation for Graph Neural Networks](https://arxiv.org/pdf/2006.06830.pdf)
 
-by [Tong Zhao](https://tzhao.io/), [Yozen Liu](https://research.snap.com/team/yozen-liu),  [Leonardo Neves](https://research.snap.com/team/leonardo-neves), [Oliver Woodford](https://ojwoodford.github.io/), [Meng Jiang](http://www.meng-jiang.com/), and [Neil Shah](http://nshah.net/).
+by [Tong Zhao](https://tzhao.io/) (tzhao2@nd.edu), [Yozen Liu](https://research.snap.com/team/yozen-liu),  [Leonardo Neves](https://research.snap.com/team/leonardo-neves), [Oliver Woodford](https://ojwoodford.github.io/), [Meng Jiang](http://www.meng-jiang.com/), and [Neil Shah](http://nshah.net/).
 
 ## Requirements
 
