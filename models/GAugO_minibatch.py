@@ -1,4 +1,5 @@
 import gc
+import math
 import logging
 import numpy as np
 import scipy.sparse as sp
@@ -11,7 +12,7 @@ from sklearn.metrics import roc_auc_score, average_precision_score
 import pickle
 
 class GAug(object):
-    def __init__(self, adj_matrix, features, labels, tvt_nids, cuda=-1, hidden_size=128, emb_size=32, n_layers=1, epochs=200, seed=-1, lr=1e-2, weight_decay=5e-4, dropout=0.5, gae=False, beta=0.5, temperature=0.2, log=True, name='debug', warmup=3, gnnlayer_type='gcn', jknet=False, alpha=1, sample_type='add_sample', feat_norm='row'):
+    def __init__(self, adj_matrix, features, labels, tvt_nids, cuda=-1, hidden_size=128, emb_size=64, n_layers=2, epochs=200, seed=-1, lr=1e-2, weight_decay=5e-4, dropout=0.5, gae=False, beta=0.5, temperature=0.2, log=True, name='debug', warmup=3, gnnlayer_type='gcn', jknet=False, alpha=1, sample_type='add_sample', feat_norm='no', batch_size=15000):
         self.lr = lr
         self.weight_decay = weight_decay
         self.n_epochs = epochs
@@ -19,6 +20,7 @@ class GAug(object):
         self.beta = beta
         self.warmup = warmup
         self.feat_norm = feat_norm
+        self.batch_size = batch_size
         # create a logger, logs are saved to GAug-[name].log when name is not None
         if log:
             self.logger = self.get_logger(name)
@@ -68,12 +70,14 @@ class GAug(object):
             self.features = F.normalize(self.features, p=1, dim=1)
         elif self.feat_norm == 'col':
             self.features = self.col_normalization(self.features)
+        else:
+            pass
         # original adj_matrix for training vgae (torch.FloatTensor)
         assert sp.issparse(adj_matrix)
         if not isinstance(adj_matrix, sp.coo_matrix):
             adj_matrix = sp.coo_matrix(adj_matrix)
         adj_matrix.setdiag(1)
-        self.adj_orig = scipysp_to_pytorchsp(adj_matrix).to_dense()
+        self.adj_orig = sp.csr_matrix(adj_matrix)
         # normalized adj_matrix used as input for ep_net (torch.sparse.FloatTensor)
         degrees = np.array(adj_matrix.sum(1))
         degree_mat_inv_sqrt = sp.diags(np.power(degrees, -0.5).flatten())
@@ -105,57 +109,50 @@ class GAug(object):
             self.out_size = len(torch.unique(self.labels))
         else:
             self.out_size = labels.size(1)
-        # sample the edges to evaluate edge prediction results
-        # sample 10% (1% for large graph) of the edges and the same number of no-edges
-        if labels.size(0) > 5000:
-            edge_frac = 0.01
-        else:
-            edge_frac = 0.1
-        adj_matrix = sp.csr_matrix(adj_matrix)
-        n_edges_sample = int(edge_frac * adj_matrix.nnz / 2)
-        # sample negative edges
-        neg_edges = []
-        added_edges = set()
-        while len(neg_edges) < n_edges_sample:
-            i = np.random.randint(0, adj_matrix.shape[0])
-            j = np.random.randint(0, adj_matrix.shape[0])
-            if i == j:
-                continue
-            if adj_matrix[i, j] > 0:
-                continue
-            if (i, j) in added_edges:
-                continue
-            neg_edges.append([i, j])
-            added_edges.add((i, j))
-            added_edges.add((j, i))
-        neg_edges = np.asarray(neg_edges)
-        # sample positive edges
-        nz_upper = np.array(sp.triu(adj_matrix, k=1).nonzero()).T
-        np.random.shuffle(nz_upper)
-        pos_edges = nz_upper[:n_edges_sample]
-        self.val_edges = np.concatenate((pos_edges, neg_edges), axis=0)
-        self.edge_labels = np.array([1]*n_edges_sample + [0]*n_edges_sample)
+
+    def extend_batch(self, seed_batch, hops):
+        nodes_batch = seed_batch
+        for _ in range(hops):
+            neigh_block = self.adj_orig[nodes_batch]
+            nodes_batch = neigh_block.sum(0).nonzero()[1]
+        nodes_batch = np.setdiff1d(nodes_batch, seed_batch, assume_unique=True)
+        nodes_batch = np.concatenate((seed_batch, nodes_batch))
+        return nodes_batch
 
     def pretrain_ep_net(self, model, adj, features, adj_orig, norm_w, pos_weight, n_epochs):
         """ pretrain the edge prediction network """
         optimizer = torch.optim.Adam(model.ep_net.parameters(),
-                                     lr=self.lr)
+                                     lr=self.lr/5)
+        batch_size = int(self.batch_size * 1.5)
+        n_batch = int(len(self.labels) / batch_size)
         model.train()
         for epoch in range(n_epochs):
-            adj_logits = model.ep_net(adj, features)
-            loss = norm_w * F.binary_cross_entropy_with_logits(adj_logits, adj_orig, pos_weight=pos_weight)
-            if not self.gae:
-                mu = model.ep_net.mean
-                lgstd = model.ep_net.logstd
-                kl_divergence = 0.5/adj_logits.size(0) * (1 + 2*lgstd - mu**2 - torch.exp(2*lgstd)).sum(1).mean()
-                loss -= kl_divergence
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            adj_pred = torch.sigmoid(adj_logits.detach()).cpu()
-            ep_auc, ep_ap = self.eval_edge_pred(adj_pred, self.val_edges, self.edge_labels)
-            self.logger.info('EPNet pretrain, Epoch [{:3}/{}]: loss {:.4f}, auc {:.4f}, ap {:.4f}'
-                        .format(epoch+1, n_epochs, loss.item(), ep_auc, ep_ap))
+            node_idx_all = np.arange(len(self.labels))
+            np.random.shuffle(node_idx_all)
+            seed_batchs = np.array_split(node_idx_all, n_batch)
+            visited_nodes = set()
+            for batch, seed_batch in enumerate(seed_batchs):
+                nodes_batch = seed_batch
+                visited_nodes |= set(nodes_batch)
+                adj_orig = torch.FloatTensor(self.adj_orig[nodes_batch][:,nodes_batch].toarray()).to(self.device)
+                adj_logits = model.ep_net(adj, features, nodes_batch)
+                loss = norm_w * F.binary_cross_entropy_with_logits(adj_logits, adj_orig, pos_weight=pos_weight)
+                if not self.gae:
+                    mu = model.ep_net.mean
+                    lgstd = model.ep_net.logstd
+                    kl_divergence = 0.5/adj_logits.size(0) * (1 + 2*lgstd - mu**2 - torch.exp(2*lgstd)).sum(1).mean()
+                    loss -= kl_divergence
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                self.logger.info('EPNet pretrain, Epoch [{:3}/{}] Batch[{:2}/{}]: loss {:.4f} Dealed Nodes [{}/{}]'
+                            .format(epoch+1, n_epochs, batch+1, n_batch, loss.item(),len(visited_nodes), len(node_idx_all)))
+                if len(visited_nodes) >= len(node_idx_all):
+                    break
+                del adj_orig, adj_logits
+                torch.cuda.empty_cache()
+                gc.collect()
+
 
     def pretrain_nc_net(self, model, adj, features, labels, n_epochs):
         """ pretrain the node classification network """
@@ -196,7 +193,7 @@ class GAug(object):
         adj = self.adj.to(self.device)
         features = self.features.to(self.device)
         labels = self.labels.to(self.device)
-        adj_orig = self.adj_orig.to(self.device)
+        adj_orig = self.adj_orig
         model = self.model.to(self.device)
         # weights for log_lik loss when training EP net
         adj_t = self.adj_orig
@@ -210,13 +207,14 @@ class GAug(object):
             self.pretrain_nc_net(model, adj, features, labels, pretrain_nc)
         # optimizers
         optims = MultipleOptimizer(torch.optim.Adam(model.ep_net.parameters(),
-                                                    lr=self.lr),
+                                                    lr=self.lr/10),
                                    torch.optim.Adam(model.nc_net.parameters(),
-                                                    lr=self.lr,
+                                                    lr=self.lr/10,
                                                     weight_decay=self.weight_decay))
         # get the learning rate schedule for the optimizer of ep_net if needed
         if self.warmup:
             ep_lr_schedule = self.get_lr_schedule_by_sigmoid(self.n_epochs, self.lr, self.warmup)
+            ep_lr_schedule /= 10
         # loss function for node classification
         if len(self.labels.size()) == 2:
             nc_criterion = nn.BCEWithLogitsLoss()
@@ -225,42 +223,57 @@ class GAug(object):
         # keep record of the best validation accuracy for early stopping
         best_val_acc = 0.
         patience_step = 0
+
+        batch_size = int(self.batch_size / 60)
+        n_batch = int(len(self.train_nid) / batch_size)
         # train model
         for epoch in range(self.n_epochs):
             # update the learning rate for ep_net if needed
             if self.warmup:
                 optims.update_lr(0, ep_lr_schedule[epoch])
 
-            model.train()
-            nc_logits, adj_logits = model(adj_norm, adj_orig, features)
+            node_idx_all = np.array(self.train_nid)
+            np.random.shuffle(node_idx_all)
+            seed_batchs = np.array_split(node_idx_all, n_batch)
+            visited_nodes = set()
+            for batch, seed_batch in enumerate(seed_batchs):
+                nodes_batch = self.extend_batch(seed_batch, 2)
+                if len(nodes_batch) >= self.batch_size:
+                    nodes_batch = nodes_batch[:self.batch_size]
+                visited_nodes |= set(nodes_batch)
+                adj_orig = torch.FloatTensor(self.adj_orig[nodes_batch][:,nodes_batch].toarray()).to(self.device)
 
-            # losses
-            loss = nc_loss = nc_criterion(nc_logits[self.train_nid], labels[self.train_nid])
-            ep_loss = norm_w * F.binary_cross_entropy_with_logits(adj_logits, adj_orig, pos_weight=pos_weight)
-            loss += self.beta * ep_loss
-            optims.zero_grad()
-            loss.backward()
-            optims.step()
-            # validate (without dropout)
-            model.eval()
-            with torch.no_grad():
-                nc_logits_eval = model.nc_net(adj, features)
-            val_acc = self.eval_node_cls(nc_logits_eval[self.val_nid], labels[self.val_nid])
-            adj_pred = torch.sigmoid(adj_logits.detach()).cpu()
-            ep_auc, ep_ap = self.eval_edge_pred(adj_pred, self.val_edges, self.edge_labels)
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                test_acc = self.eval_node_cls(nc_logits_eval[self.test_nid], labels[self.test_nid])
-                self.logger.info('Epoch [{:3}/{}]: ep loss {:.4f}, nc loss {:.4f}, ep auc: {:.4f}, ep ap {:.4f}, val acc {:.4f}, test acc {:.4f}'
-                            .format(epoch+1, self.n_epochs, ep_loss.item(), nc_loss.item(), ep_auc, ep_ap, val_acc, test_acc))
-                patience_step = 0
-            else:
-                self.logger.info('Epoch [{:3}/{}]: ep loss {:.4f}, nc loss {:.4f}, ep auc: {:.4f}, ep ap {:.4f}, val acc {:.4f}'
-                            .format(epoch+1, self.n_epochs, ep_loss.item(), nc_loss.item(), ep_auc, ep_ap, val_acc))
-                patience_step += 1
-                if patience_step == 100:
-                    self.logger.info('Early stop!')
-                    break
+                model.train()
+                nc_logits, adj_logits = model(adj_norm, adj_orig, features, nodes_batch)
+
+                # losses
+                loss = nc_loss = nc_criterion(nc_logits[:len(seed_batch)], labels[seed_batch])
+                ep_loss = norm_w * F.binary_cross_entropy_with_logits(adj_logits, adj_orig, pos_weight=pos_weight)
+                loss += self.beta * ep_loss
+                optims.zero_grad()
+                loss.backward()
+                optims.step()
+                # validate (without dropout)
+                model.eval()
+                with torch.no_grad():
+                    nc_logits_eval = model.nc_net(adj, features)
+                val_acc = self.eval_node_cls(nc_logits_eval[self.val_nid], labels[self.val_nid])
+                if val_acc > best_val_acc:
+                    best_val_acc = val_acc
+                    test_acc = self.eval_node_cls(nc_logits_eval[self.test_nid], labels[self.test_nid])
+                    self.logger.info('Epoch [{:3}/{}] Batch[{:2}/{}]: ep loss {:.4f}, nc loss {:.4f}, val acc {:.4f}, test acc {:.4f}'
+                                .format(epoch+1, self.n_epochs, batch+1, n_batch, ep_loss.item(), nc_loss.item(), val_acc, test_acc))
+                    patience_step = 0
+                else:
+                    self.logger.info('Epoch [{:3}/{}] Batch[{:2}/{}]: ep loss {:.4f}, nc loss {:.4f}, val acc {:.4f}'
+                                .format(epoch+1, self.n_epochs, batch+1, n_batch, ep_loss.item(), nc_loss.item(), val_acc))
+                    patience_step += 1
+                    if patience_step == 150:
+                        self.logger.info('Early stop!')
+                        return test_acc
+                del adj_orig, adj_logits, nc_logits, nc_logits_eval
+                torch.cuda.empty_cache()
+                gc.collect()
         # get final test result without early stop
         with torch.no_grad():
             nc_logits_eval = model.nc_net(adj, features)
@@ -426,39 +439,6 @@ class GAug_model(nn.Module):
         adj_rand = adj_rand + adj_rand.T
         return adj_rand
 
-    def sample_adj_edge(self, adj_logits, adj_orig, change_frac):
-        adj = adj_orig.to_dense() if adj_orig.is_sparse else adj_orig
-        n_edges = adj.nonzero().size(0)
-        n_change = int(n_edges * change_frac / 2)
-        # take only the upper triangle
-        edge_probs = adj_logits.triu(1)
-        edge_probs = edge_probs - torch.min(edge_probs)
-        edge_probs = edge_probs / torch.max(edge_probs)
-        adj_inverse = 1 - adj
-        # get edges to be removed
-        mask_rm = edge_probs * adj
-        nz_mask_rm = mask_rm[mask_rm>0]
-        if len(nz_mask_rm) > 0:
-            n_rm = len(nz_mask_rm) if len(nz_mask_rm) < n_change else n_change
-            thresh_rm = torch.topk(mask_rm[mask_rm>0], n_rm, largest=False)[0][-1]
-            mask_rm[mask_rm > thresh_rm] = 0
-            mask_rm = CeilNoGradient.apply(mask_rm)
-            mask_rm = mask_rm + mask_rm.T
-        # remove edges
-        adj_new = adj - mask_rm
-        # get edges to be added
-        mask_add = edge_probs * adj_inverse
-        nz_mask_add = mask_add[mask_add>0]
-        if len(nz_mask_add) > 0:
-            n_add = len(nz_mask_add) if len(nz_mask_add) < n_change else n_change
-            thresh_add = torch.topk(mask_add[mask_add>0], n_add, largest=True)[0][-1]
-            mask_add[mask_add < thresh_add] = 0
-            mask_add = CeilNoGradient.apply(mask_add)
-            mask_add = mask_add + mask_add.T
-        # add edges
-        adj_new = adj_new + mask_add
-        return adj_new
-
     def normalize_adj(self, adj):
         if self.gnnlayer_type == 'gcn':
             # adj = adj + torch.diag(torch.ones(adj.size(0))).to(self.device)
@@ -475,11 +455,9 @@ class GAug_model(nn.Module):
             adj = F.normalize(adj, p=1, dim=1)
         return adj
 
-    def forward(self, adj, adj_orig, features):
-        adj_logits = self.ep_net(adj, features)
-        if self.sample_type == 'edge':
-            adj_new = self.sample_adj_edge(adj_logits, adj_orig, self.alpha)
-        elif self.sample_type == 'add_round':
+    def forward(self, adj, adj_orig, features, nodes_batch):
+        adj_logits = self.ep_net(adj, features, nodes_batch)
+        if self.sample_type == 'add_round':
             adj_new = self.sample_adj_add_round(adj_logits, adj_orig, self.alpha)
         elif self.sample_type == 'rand':
             adj_new = self.sample_adj_random(adj_logits)
@@ -489,7 +467,7 @@ class GAug_model(nn.Module):
             else:
                 adj_new = self.sample_adj_add_bernoulli(adj_logits, adj_orig, self.alpha)
         adj_new_normed = self.normalize_adj(adj_new)
-        nc_logits = self.nc_net(adj_new_normed, features)
+        nc_logits = self.nc_net(adj_new_normed, features[nodes_batch])
         return nc_logits, adj_logits
 
 
@@ -498,11 +476,11 @@ class VGAE(nn.Module):
     def __init__(self, dim_feats, dim_h, dim_z, activation, gae=False):
         super(VGAE, self).__init__()
         self.gae = gae
-        self.gcn_base = GCNLayer(dim_feats, dim_h, 1, None, 0, bias=False)
-        self.gcn_mean = GCNLayer(dim_h, dim_z, 1, activation, 0, bias=False)
-        self.gcn_logstd = GCNLayer(dim_h, dim_z, 1, activation, 0, bias=False)
+        self.gcn_base = GCNLayer(dim_feats, dim_h, 1, None, 0, bias=False, bns=False)
+        self.gcn_mean = GCNLayer(dim_h, dim_z, 1, activation, 0, bias=False, bns=False)
+        self.gcn_logstd = GCNLayer(dim_h, dim_z, 1, activation, 0, bias=False, bns=False)
 
-    def forward(self, adj, features):
+    def forward(self, adj, features, nodes_batch):
         # GCN encoder
         hidden = self.gcn_base(adj, features)
         self.mean = self.gcn_mean(adj, hidden)
@@ -516,6 +494,7 @@ class VGAE(nn.Module):
             sampled_Z = gaussian_noise*torch.exp(self.logstd) + self.mean
             Z = sampled_Z
         # inner product decoder
+        Z = Z[nodes_batch]
         adj_logits = Z @ Z.T
         return adj_logits
 
@@ -545,7 +524,7 @@ class GNN(nn.Module):
         for i in range(n_layers - 1):
             self.layers.append(gnnlayer(dim_h*heads[i], dim_h, heads[i+1], activation, dropout))
         # output layer
-        self.layers.append(gnnlayer(dim_h*heads[-2], n_classes, heads[-1], None, dropout))
+        self.layers.append(gnnlayer(dim_h*heads[-2], n_classes, heads[-1], None, dropout, bns=False))
 
     def forward(self, adj, features):
         h = features
@@ -591,7 +570,7 @@ class GNN_JK(nn.Module):
 
 class GCNLayer(nn.Module):
     """ one layer of GCN """
-    def __init__(self, input_dim, output_dim, n_heads, activation, dropout, bias=True):
+    def __init__(self, input_dim, output_dim, n_heads, activation, dropout, bias=True, bns=True):
         super(GCNLayer, self).__init__()
         self.W = nn.Parameter(torch.FloatTensor(input_dim, output_dim))
         self.activation = activation
@@ -599,6 +578,10 @@ class GCNLayer(nn.Module):
             self.b = nn.Parameter(torch.FloatTensor(output_dim))
         else:
             self.b = None
+        if bns:
+            self.bns = torch.nn.BatchNorm1d(output_dim)
+        else:
+            self.bns = 0.
         if dropout:
             self.dropout = nn.Dropout(p=dropout)
         else:
@@ -607,11 +590,10 @@ class GCNLayer(nn.Module):
 
     def init_params(self):
         """ Initialize weights with xavier uniform and biases with all zeros """
-        for param in self.parameters():
-            if len(param.size()) == 2:
-                nn.init.xavier_uniform_(param)
-            else:
-                nn.init.constant_(param, 0.0)
+        stdv = 1. / math.sqrt(self.W.size(1))
+        self.W.data.uniform_(-stdv, stdv)
+        if self.b is not None:
+            self.b.data.uniform_(-stdv, stdv)
 
     def forward(self, adj, h):
         if self.dropout:
@@ -620,6 +602,8 @@ class GCNLayer(nn.Module):
         x = adj @ x
         if self.b is not None:
             x = x + self.b
+        if self.bns:
+            x = self.bns(x)
         if self.activation:
             x = self.activation(x)
         return x
