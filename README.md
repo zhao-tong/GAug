@@ -1,13 +1,17 @@
 Data Augmentation for Graph Neural Networks
 ====
+This repository contains the source code for the AAAI'2021 paper:
 
-This is the implementation of the proposed GAugM and GAugO and baselines.
-\[[paper](https://arxiv.org/pdf/2006.06830.pdf)\]
+[Data Augmentation for Graph Neural Networks](https://arxiv.org/pdf/2006.06830.pdf)
+
+by [Tong Zhao](https://tzhao.io/), [Yozen Liu](https://research.snap.com/team/yozen-liu),  [Leonardo Neves](https://research.snap.com/team/leonardo-neves), [Oliver Woodford](https://ojwoodford.github.io/), [Meng Jiang](http://www.meng-jiang.com/), and [Neil Shah](http://nshah.net/).
 
 ## Requirements
 
-* Python 3.7.6
-* Please refer to ```requirements.txt``` for all the packages used.
+This code package was developed and tested with Python 3.7.6. Make sure all dependencies specified in the ```requirements.txt``` file are satisfied before running the model. This can be achieved by
+```
+pip install -r requirements.txt
+```
 
 ## Usage
 The scripts for hyperparameter search with Optuna are ```optuna_[method].py```.
