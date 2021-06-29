@@ -33,8 +33,10 @@ If you find this repository useful in your research, please cite our paper:
 @inproceedings{zhao2021data,
   title={Data Augmentation for Graph Neural Networks},
   author={Zhao, Tong and Liu, Yozen and Neves, Leonardo and Woodford, Oliver and Jiang, Meng and Shah, Neil},
-  booktitle={The Thirty-Fifth AAAI Conference on Artificial Intelligence},
-  pages={},
+  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
+  volume={35},
+  number={12},
+  pages={11015--11023},
   year={2021}
 }
 ```
